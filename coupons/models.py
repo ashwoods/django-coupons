@@ -2,6 +2,7 @@ import random
 
 from django.conf import settings
 from django.db import IntegrityError
+from django.db.models import F
 from django.db import models
 from django.dispatch import Signal
 from django.utils.encoding import python_2_unicode_compatible
@@ -53,6 +54,9 @@ class CouponManager(models.Manager):
         for i in range(quantity):
             coupons.append(self.create_coupon(type, value, None, valid_until, prefix, campaign))
         return coupons
+
+    def valid(self):
+        return self.annotate(num_users=models.Count('users')).exclude(num_users__gte=F('user_limit')).exclude(valid_until__lt=timezone.now())
 
     def used(self):
         return self.exclude(users__redeemed_at__isnull=True)
@@ -120,15 +124,15 @@ class Coupon(models.Model):
         else:
             return prefix + code
 
-    def redeem(self, user=None):
+    def redeem(self, user=None, reference=None):
         try:
-            coupon_user = self.users.get(user=user)
+            coupon_user = self.users.get(user=user, reference=reference)
         except CouponUser.DoesNotExist:
             try:  # silently fix unbouned or nulled coupon users
-                coupon_user = self.users.get(user__isnull=True)
+                coupon_user = self.users.get(user__isnull=True, reference=reference)
                 coupon_user.user = user
             except CouponUser.DoesNotExist:
-                coupon_user = CouponUser(coupon=self, user=user)
+                coupon_user = CouponUser(coupon=self, user=user, reference=reference)
         coupon_user.redeemed_at = timezone.now()
         coupon_user.save()
         redeem_done.send(sender=self.__class__, coupon=self)
@@ -151,11 +155,9 @@ class Campaign(models.Model):
 @python_2_unicode_compatible
 class CouponUser(models.Model):
     coupon = models.ForeignKey(Coupon, related_name='users')
+    reference = models.CharField(max_length=150, verbose_name=_("Reference"), blank=True)
     user = models.ForeignKey(user_model, verbose_name=_("User"), null=True, blank=True)
     redeemed_at = models.DateTimeField(_("Redeemed at"), blank=True, null=True)
-
-    class Meta:
-        unique_together = (('coupon', 'user'),)
 
     def __str__(self):
         return str(self.user)
